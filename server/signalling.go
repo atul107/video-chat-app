@@ -2,9 +2,10 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
+
+	"github.com/gorilla/websocket"
 )
 
 //AllRooms is the global hashmap for the server
@@ -12,6 +13,7 @@ var AllRooms RoomMap
 
 //CreteRoomRequestHandler creates a room and return roomID
 func CreteRoomRequestHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	roomID := AllRooms.CreateRoom()
 
 	type resp struct {
@@ -21,8 +23,58 @@ func CreteRoomRequestHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp{RoomID: roomID})
 }
 
+var upgradr = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+type broadcastMsg struct {
+	Message map[string]interface{}
+	RoomID  string
+	Client  *websocket.Conn
+}
+
+var broadcast = make(chan broadcastMsg)
+
+func broadcaster() {
+	for {
+		msg := <-broadcast
+		for _, client := range AllRooms.Map[msg.RoomID] {
+			if client.Conn != msg.Client {
+				err := client.Conn.WriteJSON(msg.Message)
+				if err != nil {
+					log.Fatal(err)
+					client.Conn.Close()
+				}
+			}
+		}
+	}
+}
+
 //JoinRoomRequestHandler will join the client in particular room
 func JoinRoomRequestHandler(w http.ResponseWriter, r *http.Request) {
-	// w.Write("test")
-	fmt.Fprintf(w, "Test")
+	roomID, ok := r.URL.Query()["roomID"]
+	if !ok {
+		log.Println("roomID missing in URL parameter")
+		return
+	}
+
+	ws, err := upgradr.Upgrade(w, r, nil)
+	if err != nil {
+		log.Fatal("Web Socket Upgrade Error", err)
+	}
+	AllRooms.InsertIntoRoom(roomID[0], false, ws)
+	go broadcaster()
+	for {
+		var msg broadcastMsg
+		err := ws.ReadJSON(&msg.Message)
+		if err != nil {
+			log.Fatal("Read Error: ", err)
+		}
+		msg.Client = ws
+		msg.RoomID = roomID[0]
+
+		broadcast <- msg
+	}
 }
